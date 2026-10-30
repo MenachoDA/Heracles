@@ -1,0 +1,28 @@
+{
+    "name": "Heracles",
+    "version": "1.0.0",
+    "description": "Backend API para ejecución de scripts de Python",
+    "main": "src/server.ts",
+    "scripts": {
+        "start": "ts-node src/server.ts",
+        "dev": "ts-node-dev --respawn src/server.ts"
+    },
+    "dependencies": {
+        "@types/mssql": "^12.3.0",
+        "cors": "^2.8.5",
+        "dotenv": "^18.0.9",
+        "express": "^4.18.2",
+        "mssql": "^12.7.13",
+        "multer": "^1.4.5-lts.1",
+        "xlsx": "^0.18.5"
+    },
+    "devDependencies": {
+        "@types/cors": "^2.8.17",
+        "@types/express": "^4.17.21",
+        "@types/multer": "^1.4.11",
+        "@types/node": "^20.11.17",
+        "ts-node": "^10.9.2",
+        "ts-node-dev": "^2.0.0",
+        "typescript": "^5.3.3"
+    }
+}
