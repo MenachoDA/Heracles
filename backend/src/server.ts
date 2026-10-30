@@ -90,7 +90,7 @@ export async function getDbPool(): Promise<sql.ConnectionPool> {
 
 // Middlewares
 app.use(cors());
-app.use(express.json());
+app.use(express.static(path.join(__dirname, '../../frontend/dist')));
 
 // Crear directorios necesarios
 const dirs = ['uploads', 'outputs'];
