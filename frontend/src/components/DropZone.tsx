@@ -16,7 +16,9 @@ const DropZone: React.FC<DropZoneProps> = ({ onFileSelected }) => {
     const { getRootProps, getInputProps, isDragActive, isDragReject } = useDropzone({
         onDrop,
         accept: {
-            'text/csv': ['.csv']
+            'text/csv': ['.csv'],
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
+            'application/vnd.ms-excel': ['.xls']
         },
         maxFiles: 1
     });
@@ -34,8 +36,8 @@ const DropZone: React.FC<DropZoneProps> = ({ onFileSelected }) => {
             <h2 className="text-2xl font-bold text-brand-blue text-center">
                 {isDragActive ? 'Suelta el archivo aquí' : 'Arrastrar o seleccionar un archivo'}
             </h2>
-            <p className="text-gray-400 mt-3 text-sm">Solo archivos CSV (.csv)</p>
-            {isDragReject && <p className="text-red-500 mt-2 font-medium">Formato no válido. Debe ser CSV.</p>}
+            <p className="text-gray-400 mt-3 text-sm">Archivos CSV o Excel (.csv, .xlsx, .xls)</p>
+            {isDragReject && <p className="text-red-500 mt-2 font-medium">Formato no válido. Debe ser CSV o Excel (.csv, .xlsx, .xls).</p>}
         </div>
     );
 };

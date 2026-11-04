@@ -3,6 +3,7 @@ import { POStrategy } from '../strategies/POStrategy';
 import { CSFStrategy } from '../strategies/CSFStrategy';
 import { ProcessingStrategy } from '../strategies/ProcessingStrategy';
 import { BNStrategy } from '../strategies/BNStrategy';
+import { convertirExcelACsv } from '../utils/fileUtils';
 import path from 'path';
 import fs from 'fs';
 
@@ -29,7 +30,16 @@ export class ProcessController {
                 return;
             }
 
-            const result = await strategy.execute(req.file.path, req.file.originalname);
+            let inputFilePath = req.file.path;
+            let originalName = req.file.originalname;
+            const ext = path.extname(originalName).toLowerCase();
+
+            if (ext === '.xlsx' || ext === '.xls') {
+                inputFilePath = convertirExcelACsv(inputFilePath);
+                originalName = `${path.parse(originalName).name}.csv`;
+            }
+
+            const result = await strategy.execute(inputFilePath, originalName);
 
             res.json({
                 success: true,

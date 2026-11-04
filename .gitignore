@@ -10,12 +10,12 @@ lerna-debug.log*
 backend/node_modules
 frontend/node_modules
 node_modules/
-backend/outputs
-backend/uploads
+backend/outputs/
+backend/uploads/
 backend/scripts/enriquecimiento_banca.py
 backend/scripts/enriquecimiento.py
 backend/scripts/pegado_oferta.py
-frontend
+backend/scripts/
 dist
 dist-ssr
 *.local

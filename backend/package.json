@@ -1,6 +1,6 @@
 {
     "name": "Heracles",
-    "version": "1.8.0",
+    "version": "2.0.0",
     "description": "Backend API para ejecución de scripts de Python",
     "main": "src/server.ts",
     "scripts": {

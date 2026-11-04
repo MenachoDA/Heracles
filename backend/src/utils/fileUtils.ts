@@ -1,12 +1,76 @@
 import fs from 'fs';
 import path from 'path';
 import sql from 'mssql';
-import * as XLSX from 'xlsx';
+import * as XLSXNs from 'xlsx';
+
+const XLSX: typeof XLSXNs = (XLSXNs as any).default || XLSXNs;
 
 export interface CsvData {
     columns: string[];
     rows: Record<string, string | null>[];
 }
+
+/**
+ * Replica la lógica de backend/scripts/excel_csv.py:
+ * Convierte un archivo Excel (.xlsx / .xls) a CSV con codificación utf-8-sig
+ * manteniendo los ceros a la izquierda en documentos (DNI / RUC).
+ */
+export const convertirExcelACsv = (rutaExcel: string): string => {
+    if (!fs.existsSync(rutaExcel)) {
+        throw new Error(`El archivo Excel no existe: ${rutaExcel}`);
+    }
+
+    const parsed = path.parse(rutaExcel);
+    const rutaCsv = path.join(parsed.dir, `${parsed.name}.csv`);
+
+    try {
+        const workbook = XLSX.readFile(rutaExcel);
+        const firstSheetName = workbook.SheetNames[0];
+        if (!firstSheetName) {
+            throw new Error('El archivo Excel no contiene hojas válidas.');
+        }
+
+        const worksheet = workbook.Sheets[firstSheetName];
+        const range = XLSX.utils.decode_range(worksheet['!ref'] || 'A1');
+
+        for (let R = range.s.r; R <= range.e.r; ++R) {
+            for (let C = range.s.c; C <= range.e.c; ++C) {
+                const addr = XLSX.utils.encode_cell({ r: R, c: C });
+                const cell = worksheet[addr];
+                if (!cell) continue;
+
+                if (cell.t === 'n') {
+                    // Si tiene formato con ceros a la izquierda (ej. DNI "00000000"), preservar el texto formateado
+                    if (cell.w && /^0\d+$/.test(cell.w.trim())) {
+                        cell.w = cell.w.trim();
+                    } else if (cell.v !== undefined) {
+                        cell.w = String(cell.v);
+                    }
+                } else if (cell.w !== undefined || cell.v !== undefined) {
+                    const strVal = String(cell.w ?? cell.v ?? '').replace(/\r?\n/g, ' ');
+                    cell.w = strVal;
+                    if (cell.t === 's') {
+                        cell.v = strVal;
+                    }
+                }
+            }
+        }
+
+        const csvContent = XLSX.utils.sheet_to_csv(worksheet, {
+            FS: ',',
+            RS: '\n',
+            blankrows: false
+        });
+
+        // Escribir con BOM UTF-8 (equivalente a encoding='utf-8-sig' en pandas)
+        fs.writeFileSync(rutaCsv, '\uFEFF' + csvContent, 'utf8');
+        console.log('Archivo convertido');
+        return rutaCsv;
+    } catch (error) {
+        console.error('Ocurrió un error al convertir el archivo:', error);
+        throw new Error('Ocurrió un error al convertir el archivo Excel a CSV.');
+    }
+};
 
 /**
  * Extrae la sentencia SQL asignada a QUERY_CRUCE dentro de un script en backend/scripts.
