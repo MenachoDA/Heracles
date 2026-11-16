@@ -13,7 +13,36 @@ import { getDbPool } from '../server';
 import path from 'path';
 
 const FALLBACK_PO_QUERY = `
-SELECT DISTINCT 
+WITH NumerosDesglosados AS (
+    SELECT 
+        A.DOC,
+        V.Tel,
+        ROW_NUMBER() OVER (PARTITION BY A.DOC ORDER BY (SELECT NULL)) AS rn
+    FROM BASEPO A
+    LEFT JOIN WO_BI_CELULARES C WITH (NOLOCK) ON A.DOC = C.DNI
+    OUTER APPLY (
+        SELECT DISTINCT Tel 
+        FROM (VALUES 
+            (C.VALIDO1), (C.CEL1), (C.CLARO1), 
+            (C.ENTEL1), (C.ENTEL2), (C.CLARO2), 
+            (C.VALIDO2), (C.VALIDO3)
+        ) AS T(Tel)
+        WHERE Tel LIKE '9________' AND LEN(Tel) = 9
+    ) V
+),
+
+NumerosPivoteados AS (
+    SELECT 
+        DOC,
+        MAX(CASE WHEN rn = 1 THEN Tel END) AS CEL1,
+        MAX(CASE WHEN rn = 2 THEN Tel END) AS CEL2,
+        MAX(CASE WHEN rn = 3 THEN Tel END) AS CEL3,
+        MAX(CASE WHEN rn = 4 THEN Tel END) AS CEL4
+    FROM NumerosDesglosados
+    GROUP BY DOC
+)
+
+SELECT 
     A.*,
     D.AMATERNO,
     D.APATERNO,
@@ -22,20 +51,15 @@ SELECT DISTINCT
     D.DEPARTAMENTO,
     D.PROVINCIA,
     D.DISTRITO,
-    C.VALIDO1,
-    C.CEL1,
-    C.CLARO1,
-    C.ENTEL1,
-    C.ENTEL2,
-    C.CLARO2,
-    C.VALIDO2,
-    C.VALIDO3
-FROM BASEPO A 
-
-LEFT JOIN WO_BI_CELULARES C WITH (NOLOCK)
-ON A.DOC=C.DNI
+    P.CEL1,
+    P.CEL2,
+    P.CEL3,
+    P.CEL4
+--INTO #TEMP1
+FROM BASEPO A
+LEFT JOIN NumerosPivoteados P ON A.DOC = P.DOC
 LEFT JOIN DT_RENIEC D WITH (NOLOCK)
-ON  A.DOC=D.DNI
+ON  A.DOC=D.DNI;
 `;
 
 export class POStrategy implements ProcessingStrategy {
