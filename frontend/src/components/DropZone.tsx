@@ -26,7 +26,7 @@ const DropZone: React.FC<DropZoneProps> = ({ onFileSelected }) => {
     return (
         <div
             {...getRootProps()}
-            className={`w-full max-w-2xl mt-20 mx-auto border-4 border-dashed rounded-3xl p-16 flex flex-col items-center justify-center cursor-pointer transition-colors bg-white
+            className={`w-full max-w-2xl mt-4 mx-auto border-4 border-dashed rounded-3xl p-16 flex flex-col items-center justify-center cursor-pointer transition-colors bg-white
                 ${isDragActive ? 'border-brand-blue bg-blue-50' : 'border-transparent'}
                 ${isDragReject ? 'border-red-500 bg-red-50' : ''}`}
             style={{ minHeight: '350px', boxShadow: isDragActive ? 'none' : '0 4px 6px -1px rgb(0 0 0 / 0.05), 0 2px 4px -2px rgb(0 0 0 / 0.1)' }}
