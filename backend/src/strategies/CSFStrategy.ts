@@ -43,13 +43,21 @@ NumerosPivoteados AS (
 
 SELECT 
     A.*,
+    D.AMATERNO,
+    D.APATERNO,
+    D.NOMBRES,
+    d.Edad,
+    D.DEPARTAMENTO,
+    D.PROVINCIA,
+    D.DISTRITO,
     P.CEL1,
     P.CEL2,
     P.CEL3,
     P.CEL4
 --INTO #TEMP1
 FROM BASECSF A
-LEFT JOIN NumerosPivoteados P ON A.DOC_IDENTIDAD = P.DOC_IDENTIDAD;
+LEFT JOIN NumerosPivoteados P ON A.DOC_IDENTIDAD = P.DOC_IDENTIDAD
+LEFT JOIN DT_RENIEC D WITH (NOLOCK) ON A.DOC_IDENTIDAD=D.DNI;
 `;
 
 export class CSFStrategy implements ProcessingStrategy {
