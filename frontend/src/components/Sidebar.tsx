@@ -1,6 +1,8 @@
 import React from 'react';
+import { Home } from 'lucide-react';
 
 export type EnrichmentViewType = 'po' | 'csf';
+export type AppViewType = 'dashboard' | EnrichmentViewType;
 
 interface SidebarItem {
     id: EnrichmentViewType;
@@ -13,13 +15,29 @@ const SIDEBAR_ITEMS: SidebarItem[] = [
 ];
 
 interface SidebarProps {
-    activeView: EnrichmentViewType;
-    onSelectView: (view: EnrichmentViewType) => void;
+    activeView: AppViewType;
+    onSelectView: (view: AppViewType) => void;
 }
 
 const Sidebar: React.FC<SidebarProps> = ({ activeView, onSelectView }) => {
+    const isDashboardActive = activeView === 'dashboard';
+
     return (
         <aside className="w-30 bg-brand-blue min-h-screen flex flex-col py-8 px-2 gap-4 shadow-md shrink-0">
+            <button
+                type="button"
+                onClick={() => onSelectView('dashboard')}
+                title="Dashboard"
+                aria-label="Dashboard"
+                className={`w-full py-2 px-3 rounded-lg transition-all flex items-center justify-center
+                    ${isDashboardActive
+                        ? 'bg-brand-yellow text-black font-bold shadow-md ring-2 ring-white'
+                        : 'bg-white/85 text-gray-800 font-semibold shadow-sm hover:bg-brand-yellow hover:text-black'
+                    }`}
+            >
+                <Home size={20} />
+            </button>
+
             {SIDEBAR_ITEMS.map((item) => {
                 const isActive = activeView === item.id;
                 return (

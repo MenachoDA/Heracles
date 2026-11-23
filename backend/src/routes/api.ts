@@ -20,5 +20,6 @@ const processController = new ProcessController();
 
 router.post('/process', upload.single('file'), processController.processFile.bind(processController));
 router.get('/download/:filename', processController.downloadFile.bind(processController));
+router.get('/dashboard', processController.getDashboard.bind(processController));
 
 export default router;
