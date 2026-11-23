@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import zlib from 'zlib';
 import sql from 'mssql';
 import * as XLSXNs from 'xlsx';
 
@@ -373,4 +374,386 @@ export const exportToExcel = (
 export const getFileSize = (filePath: string): number => {
     const stats = fs.statSync(filePath);
     return stats.size;
+};
+
+export interface DashboardFileMetadata {
+    id: string;
+    name: string;
+    rawName: string;
+    source: 'uploads' | 'outputs';
+    processType: 'po' | 'csf';
+    rows: number;
+    size: number;
+    timestamp: number;
+    date: string; // YYYY-MM-DD
+}
+
+export interface DailyTimelinePoint {
+    date: string;
+    uploadsFiles: number;
+    outputsFiles: number;
+    totalFiles: number;
+    poFiles: number;
+    csfFiles: number;
+    uploadsRecords: number;
+    outputsRecords: number;
+    totalRecords: number;
+    poRecords: number;
+    csfRecords: number;
+}
+
+export interface DashboardStatsResponse {
+    summary: {
+        totalFiles: number;
+        uploadsFiles: number;
+        outputsFiles: number;
+        rawUploadsFilesOnDisk: number;
+        poFiles: number;
+        csfFiles: number;
+        poUploadsFiles: number;
+        poOutputsFiles: number;
+        csfUploadsFiles: number;
+        csfOutputsFiles: number;
+        totalRecords: number;
+        uploadsRecords: number;
+        outputsRecords: number;
+        poRecords: number;
+        csfRecords: number;
+        poUploadsRecords: number;
+        poOutputsRecords: number;
+        csfUploadsRecords: number;
+        csfOutputsRecords: number;
+    };
+    timeline: DailyTimelinePoint[];
+    files: DashboardFileMetadata[];
+    updatedAt: string;
+}
+
+const fileMetadataCache = new Map<string, { mtimeMs: number; size: number; rows: number; processType: 'po' | 'csf' }>();
+
+function formatLocalDate(ms: number): string {
+    const d = new Date(ms);
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+}
+
+function extractTimestampFromName(filename: string, fallbackMs: number): number {
+    const m = filename.match(/(\d{13})/);
+    if (m) {
+        const ts = parseInt(m[1], 10);
+        if (ts > 1500000000000 && ts < 2500000000000) {
+            return ts;
+        }
+    }
+    return fallbackMs;
+}
+
+/**
+ * Extrae rápidamente la cantidad de registros de un archivo .xlsx leyendo el tag <dimension ref="..." />
+ * de xl/worksheets/sheet1.xml directamente desde el contenedor ZIP sin cargar todo el archivo en memoria.
+ */
+export function getXlsxRowCountFast(filePath: string): number {
+    const fd = fs.openSync(filePath, 'r');
+    try {
+        const stat = fs.fstatSync(fd);
+        const tailSize = Math.min(65536, stat.size);
+        const tailBuf = Buffer.alloc(tailSize);
+        fs.readSync(fd, tailBuf, 0, tailSize, stat.size - tailSize);
+
+        const target = Buffer.from('xl/worksheets/sheet1.xml');
+        let idx = 0;
+        while ((idx = tailBuf.indexOf(target, idx)) !== -1) {
+            if (idx >= 46 && tailBuf.readUInt32LE(idx - 46) === 0x02014b50) {
+                const cdOffset = idx - 46;
+                const compressionMethod = tailBuf.readUInt16LE(cdOffset + 10);
+                const localHeaderOffset = tailBuf.readUInt32LE(cdOffset + 42);
+
+                const lhBuf = Buffer.alloc(1024);
+                fs.readSync(fd, lhBuf, 0, 1024, localHeaderOffset);
+                const fnameLen = lhBuf.readUInt16LE(26);
+                const extraLen = lhBuf.readUInt16LE(28);
+                const dataOffset = localHeaderOffset + 30 + fnameLen + extraLen;
+
+                const chunk = Buffer.alloc(4096);
+                const bytesRead = fs.readSync(fd, chunk, 0, 4096, dataOffset);
+
+                let xmlHead = '';
+                if (compressionMethod === 0) {
+                    xmlHead = chunk.subarray(0, bytesRead).toString('utf8');
+                } else if (compressionMethod === 8) {
+                    const inflated = zlib.inflateRawSync(chunk.subarray(0, bytesRead), {
+                        finishFlush: zlib.constants.Z_SYNC_FLUSH
+                    });
+                    xmlHead = inflated.toString('utf8');
+                }
+                const m =
+                    xmlHead.match(/<dimension\s+ref="[A-Z]+\d+:[A-Z]+(\d+)"/) ||
+                    xmlHead.match(/<dimension\s+ref="[A-Z]+(\d+)"/);
+                if (m) {
+                    return Math.max(0, parseInt(m[1], 10) - 1);
+                }
+            }
+            idx += target.length;
+        }
+    } catch (err) {
+        console.warn(`No se pudo extraer dimension rápida de ${filePath}:`, err);
+    } finally {
+        fs.closeSync(fd);
+    }
+    return 0;
+}
+
+/**
+ * Cuenta rápidamente las filas de un archivo CSV y detecta si corresponde a PO o CSF según sus cabeceras.
+ */
+export function getCsvInfoFast(filePath: string): { rows: number; processType: 'po' | 'csf' } {
+    const buf = fs.readFileSync(filePath);
+    let lines = 0;
+    let firstNewline = -1;
+    for (let i = 0; i < buf.length; i++) {
+        if (buf[i] === 10) {
+            if (firstNewline === -1) firstNewline = i;
+            lines++;
+        }
+    }
+    if (buf.length > 0 && buf[buf.length - 1] !== 10) {
+        lines++;
+    }
+
+    const headerEnd = firstNewline !== -1 ? firstNewline : Math.min(512, buf.length);
+    const header = buf.subarray(0, headerEnd).toString('utf8').toUpperCase();
+    const processType: 'po' | 'csf' = header.includes('DOC_IDENTIDAD') ? 'csf' : 'po';
+
+    return {
+        rows: Math.max(0, lines - 1),
+        processType
+    };
+}
+
+function getCachedFileInfo(filePath: string, defaultProcessType: 'po' | 'csf'): { rows: number; processType: 'po' | 'csf' } {
+    const stat = fs.statSync(filePath);
+    const cached = fileMetadataCache.get(filePath);
+    if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+        return { rows: cached.rows, processType: cached.processType };
+    }
+
+    const ext = path.extname(filePath).toLowerCase();
+    let rows = 0;
+    let processType = defaultProcessType;
+
+    if (ext === '.csv') {
+        const info = getCsvInfoFast(filePath);
+        rows = info.rows;
+        processType = info.processType;
+    } else if (ext === '.xlsx' || ext === '.xls') {
+        rows = getXlsxRowCountFast(filePath);
+    }
+
+    fileMetadataCache.set(filePath, {
+        mtimeMs: stat.mtimeMs,
+        size: stat.size,
+        rows,
+        processType
+    });
+
+    return { rows, processType };
+}
+
+/**
+ * Lee los metadatos de los archivos en las carpetas uploads y outputs para alimentar el Dashboard.
+ */
+export const getDashboardStats = (): DashboardStatsResponse => {
+    const uploadsDir = path.join(__dirname, '../../uploads');
+    const outputsDir = path.join(__dirname, '../../outputs');
+
+    const files: DashboardFileMetadata[] = [];
+    let rawUploadsFilesOnDisk = 0;
+
+    // 1. Procesar carpeta uploads (agrupando pares .xlsx/.csv generados por convertirExcelACsv)
+    if (fs.existsSync(uploadsDir)) {
+        const uploadGroups = new Map<string, { [ext: string]: string }>();
+
+        for (const f of fs.readdirSync(uploadsDir)) {
+            if (f.startsWith('.')) continue;
+            const ext = path.extname(f).toLowerCase();
+            if (ext !== '.csv' && ext !== '.xlsx' && ext !== '.xls') continue;
+            rawUploadsFilesOnDisk++;
+            const base = path.parse(f).name;
+            if (!uploadGroups.has(base)) {
+                uploadGroups.set(base, {});
+            }
+            uploadGroups.get(base)![ext] = f;
+        }
+
+        for (const [, group] of uploadGroups.entries()) {
+            const primaryFile = group['.xlsx'] || group['.xls'] || group['.csv'];
+            if (!primaryFile) continue;
+
+            const primaryPath = path.join(uploadsDir, primaryFile);
+            const stat = fs.statSync(primaryPath);
+            const timestamp = extractTimestampFromName(primaryFile, stat.mtimeMs);
+
+            let rows = 0;
+            let processType: 'po' | 'csf' = 'csf';
+
+            if (group['.csv']) {
+                const csvInfo = getCachedFileInfo(path.join(uploadsDir, group['.csv']), 'csf');
+                rows = csvInfo.rows;
+                processType = csvInfo.processType;
+            } else {
+                const excelInfo = getCachedFileInfo(primaryPath, 'csf');
+                rows = excelInfo.rows;
+                processType = excelInfo.processType;
+            }
+
+            files.push({
+                id: `uploads_${primaryFile}`,
+                name: primaryFile.replace(/^\d{13}_/, ''),
+                rawName: primaryFile,
+                source: 'uploads',
+                processType,
+                rows,
+                size: stat.size,
+                timestamp,
+                date: formatLocalDate(timestamp)
+            });
+        }
+    }
+
+    // 2. Procesar carpeta outputs
+    if (fs.existsSync(outputsDir)) {
+        for (const f of fs.readdirSync(outputsDir)) {
+            if (f.startsWith('.')) continue;
+            const ext = path.extname(f).toLowerCase();
+            if (ext !== '.xlsx' && ext !== '.csv' && ext !== '.xls') continue;
+
+            const fullPath = path.join(outputsDir, f);
+            const stat = fs.statSync(fullPath);
+            const timestamp = extractTimestampFromName(f, stat.mtimeMs);
+            const defaultType: 'po' | 'csf' = f.startsWith('BASE_PO') ? 'po' : 'csf';
+            const info = getCachedFileInfo(fullPath, defaultType);
+            const processType: 'po' | 'csf' = f.startsWith('BASE_PO') ? 'po' : info.processType;
+
+            files.push({
+                id: `outputs_${f}`,
+                name: f.replace(/^\d{13}_/, ''),
+                rawName: f,
+                source: 'outputs',
+                processType,
+                rows: info.rows,
+                size: stat.size,
+                timestamp,
+                date: formatLocalDate(timestamp)
+            });
+        }
+    }
+
+    // Ordenar archivos del más reciente al más antiguo
+    files.sort((a, b) => b.timestamp - a.timestamp);
+
+    // 3. Construir línea de tiempo por día y resumen global
+    const timelineMap = new Map<string, DailyTimelinePoint>();
+
+    let uploadsFiles = 0;
+    let outputsFiles = 0;
+    let poUploadsFiles = 0;
+    let poOutputsFiles = 0;
+    let csfUploadsFiles = 0;
+    let csfOutputsFiles = 0;
+
+    let uploadsRecords = 0;
+    let outputsRecords = 0;
+    let poUploadsRecords = 0;
+    let poOutputsRecords = 0;
+    let csfUploadsRecords = 0;
+    let csfOutputsRecords = 0;
+
+    for (const item of files) {
+        if (!timelineMap.has(item.date)) {
+            timelineMap.set(item.date, {
+                date: item.date,
+                uploadsFiles: 0,
+                outputsFiles: 0,
+                totalFiles: 0,
+                poFiles: 0,
+                csfFiles: 0,
+                uploadsRecords: 0,
+                outputsRecords: 0,
+                totalRecords: 0,
+                poRecords: 0,
+                csfRecords: 0
+            });
+        }
+
+        const dayPoint = timelineMap.get(item.date)!;
+        dayPoint.totalFiles += 1;
+        dayPoint.totalRecords += item.rows;
+
+        if (item.source === 'uploads') {
+            uploadsFiles += 1;
+            uploadsRecords += item.rows;
+            dayPoint.uploadsFiles += 1;
+            dayPoint.uploadsRecords += item.rows;
+
+            if (item.processType === 'po') {
+                poUploadsFiles += 1;
+                poUploadsRecords += item.rows;
+            } else {
+                csfUploadsFiles += 1;
+                csfUploadsRecords += item.rows;
+            }
+        } else {
+            outputsFiles += 1;
+            outputsRecords += item.rows;
+            dayPoint.outputsFiles += 1;
+            dayPoint.outputsRecords += item.rows;
+
+            if (item.processType === 'po') {
+                poOutputsFiles += 1;
+                poOutputsRecords += item.rows;
+            } else {
+                csfOutputsFiles += 1;
+                csfOutputsRecords += item.rows;
+            }
+        }
+
+        if (item.processType === 'po') {
+            dayPoint.poFiles += 1;
+            dayPoint.poRecords += item.rows;
+        } else {
+            dayPoint.csfFiles += 1;
+            dayPoint.csfRecords += item.rows;
+        }
+    }
+
+    const timeline = Array.from(timelineMap.values()).sort((a, b) => a.date.localeCompare(b.date));
+
+    return {
+        summary: {
+            totalFiles: uploadsFiles + outputsFiles,
+            uploadsFiles,
+            outputsFiles,
+            rawUploadsFilesOnDisk,
+            poFiles: poUploadsFiles + poOutputsFiles,
+            csfFiles: csfUploadsFiles + csfOutputsFiles,
+            poUploadsFiles,
+            poOutputsFiles,
+            csfUploadsFiles,
+            csfOutputsFiles,
+            totalRecords: uploadsRecords + outputsRecords,
+            uploadsRecords,
+            outputsRecords,
+            poRecords: poUploadsRecords + poOutputsRecords,
+            csfRecords: csfUploadsRecords + csfOutputsRecords,
+            poUploadsRecords,
+            poOutputsRecords,
+            csfUploadsRecords,
+            csfOutputsRecords
+        },
+        timeline,
+        files,
+        updatedAt: new Date().toISOString()
+    };
 };

@@ -33,9 +33,10 @@ const VIEW_CONFIG: Record<EnrichmentViewType, ViewConfig> = {
 interface EnrichmentViewProps {
     type: EnrichmentViewType;
     isActive: boolean;
+    onProcessSuccess?: () => void;
 }
 
-const EnrichmentView: React.FC<EnrichmentViewProps> = ({ type, isActive }) => {
+const EnrichmentView: React.FC<EnrichmentViewProps> = ({ type, isActive, onProcessSuccess }) => {
     const [inputFile, setInputFile] = useState<InputFileMeta | null>(null);
     const [outputFile, setOutputFile] = useState<OutputMetadata | null>(null);
     const [status, setStatus] = useState<'idle' | 'loading' | 'error'>('idle');
@@ -72,6 +73,7 @@ const EnrichmentView: React.FC<EnrichmentViewProps> = ({ type, isActive }) => {
             const result = await processFileService(inputFile.file, type);
             setOutputFile(result);
             setStatus('idle');
+            onProcessSuccess?.();
         } catch (error: unknown) {
             setStatus('error');
             const axiosError = error as { response?: { data?: { error?: string } } };

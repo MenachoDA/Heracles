@@ -3,7 +3,7 @@ import { POStrategy } from '../strategies/POStrategy';
 import { CSFStrategy } from '../strategies/CSFStrategy';
 import { ProcessingStrategy } from '../strategies/ProcessingStrategy';
 import { BNStrategy } from '../strategies/BNStrategy';
-import { convertirExcelACsv } from '../utils/fileUtils';
+import { convertirExcelACsv, getDashboardStats } from '../utils/fileUtils';
 import path from 'path';
 import fs from 'fs';
 
@@ -59,6 +59,16 @@ export class ProcessController {
             res.download(filePath);
         } else {
             res.status(404).json({ error: 'Archivo no encontrado.' });
+        }
+    }
+
+    public getDashboard(req: Request, res: Response): void {
+        try {
+            const stats = getDashboardStats();
+            res.json(stats);
+        } catch (error: any) {
+            console.error('Error al obtener estadísticas del dashboard:', error);
+            res.status(500).json({ error: error.message || 'Error al obtener estadísticas del dashboard.' });
         }
     }
 }
