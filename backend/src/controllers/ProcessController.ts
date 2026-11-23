@@ -3,6 +3,7 @@ import { POStrategy } from '../strategies/POStrategy';
 import { CSFStrategy } from '../strategies/CSFStrategy';
 import { ProcessingStrategy } from '../strategies/ProcessingStrategy';
 import { BNStrategy } from '../strategies/BNStrategy';
+import { SolicitarPOStrategy } from '../strategies/SolicitarPOStrategy';
 import { convertirExcelACsv, getDashboardStats } from '../utils/fileUtils';
 import path from 'path';
 import fs from 'fs';
@@ -24,7 +25,8 @@ export class ProcessController {
                 strategy = new CSFStrategy();
             } else if (type === 'bn') {
                 strategy = new BNStrategy();
-
+            } else if (type === 'solicitar_po') {
+                strategy = new SolicitarPOStrategy();
             } else {
                 res.status(400).json({ error: 'Tipo de procesamiento no válido.' });
                 return;
