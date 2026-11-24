@@ -8,7 +8,7 @@ const XLSX: typeof XLSXNs = (XLSXNs as any).default || XLSXNs;
 
 export interface CsvData {
     columns: string[];
-    rows: Record<string, string | null>[];
+    rows: (string | null)[][];
 }
 
 /**
@@ -123,8 +123,11 @@ function parseCsvLine(line: string, delimiter: string): string[] {
 /**
  * Detecta la codificación del archivo (UTF-8 con/sin BOM o Latin1) y el delimitador (',', ';', '\t', '|'),
  * manteniendo todos los valores como string para no perder ceros a la izquierda en los DNI.
+ * Si se indica `applyPoCleaning = true`, aplica en una sola pasada la limpieza de PO
+ * (eliminación de TEXTO01..20 y filtrado de 'SIN OFERTA') almacenando filas compactas por índice
+ * en lugar de objetos por fila para minimizar drásticamente el consumo de memoria RAM.
  */
-export const readCsvFile = (filePath: string): CsvData => {
+export const readCsvFile = (filePath: string, applyPoCleaning = false): CsvData => {
     console.log(`Leyendo archivo en: ${filePath}`);
     const buffer = fs.readFileSync(filePath);
 
@@ -139,8 +142,24 @@ export const readCsvFile = (filePath: string): CsvData => {
         encodingUsed = 'latin1';
     }
 
-    const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
-    if (lines.length === 0) {
+    // Encontrar la primera línea no vacía sin duplicar todo el archivo en un arreglo gigante de líneas
+    let pos = 0;
+    const len = text.length;
+    let firstLine = '';
+
+    while (pos < len) {
+        let nextNL = text.indexOf('\n', pos);
+        if (nextNL === -1) nextNL = len;
+        let line = text.slice(pos, nextNL);
+        if (line.endsWith('\r')) line = line.slice(0, -1);
+        pos = nextNL + 1;
+        if (line.trim().length > 0) {
+            firstLine = line;
+            break;
+        }
+    }
+
+    if (!firstLine) {
         throw new Error('El archivo CSV está vacío.');
     }
 
@@ -148,95 +167,164 @@ export const readCsvFile = (filePath: string): CsvData => {
     let selectedDelimiter = ',';
 
     for (const sep of delimiters) {
-        const sampleCols = parseCsvLine(lines[0], sep);
+        const sampleCols = parseCsvLine(firstLine, sep);
         if (sampleCols.length > 1) {
             selectedDelimiter = sep;
             break;
         }
     }
 
-    const rawHeaders = parseCsvLine(lines[0], selectedDelimiter).map((h) => h.trim());
-    const rows: Record<string, string | null>[] = [];
+    const rawHeaders = parseCsvLine(firstLine, selectedDelimiter).map((h) => h.trim());
+    const initialCols = rawHeaders.filter((h) => h.length > 0).length;
 
-    for (let i = 1; i < lines.length; i++) {
-        const values = parseCsvLine(lines[i], selectedDelimiter);
-        const rowObj: Record<string, string | null> = {};
-
-        for (let c = 0; c < rawHeaders.length; c++) {
-            const colName = rawHeaders[c];
-            if (!colName) continue;
-            const rawVal = values[c] !== undefined ? values[c].trim() : '';
-            rowObj[colName] = rawVal === '' ? null : rawVal;
+    const textTargets = new Set<string>();
+    if (applyPoCleaning) {
+        for (let i = 1; i <= 20; i++) {
+            textTargets.add(`TEXTO${String(i).padStart(2, '0')}`);
+            textTargets.add(`TEXTO${i}`);
         }
-        rows.push(rowObj);
+    }
+
+    const keptIndices: number[] = [];
+    const keptColumns: string[] = [];
+    const droppedTextCols: string[] = [];
+
+    for (let c = 0; c < rawHeaders.length; c++) {
+        const h = rawHeaders[c];
+        if (!h) continue;
+        const colName = applyPoCleaning ? h.toUpperCase() : h;
+        if (applyPoCleaning && textTargets.has(colName)) {
+            droppedTextCols.push(colName);
+            continue;
+        }
+        keptIndices.push(c);
+        keptColumns.push(colName);
+    }
+
+    const campanaIdxInKept = applyPoCleaning
+        ? keptColumns.findIndex((c) => ['CAMPAÑA', 'CAMPANA', 'CAMPAÑA_OFERTA'].includes(c))
+        : -1;
+
+    const rows: (string | null)[][] = [];
+    let totalRawRows = 0;
+    let sinOfertaCount = 0;
+
+    while (pos < len) {
+        let nextNL = text.indexOf('\n', pos);
+        if (nextNL === -1) nextNL = len;
+        let line = text.slice(pos, nextNL);
+        if (line.endsWith('\r')) line = line.slice(0, -1);
+        pos = nextNL + 1;
+
+        if (line.trim().length === 0) continue;
+        totalRawRows++;
+
+        const values = parseCsvLine(line, selectedDelimiter);
+        const rowArr = new Array<string | null>(keptIndices.length);
+
+        for (let k = 0; k < keptIndices.length; k++) {
+            const c = keptIndices[k];
+            const rawVal = values[c] !== undefined ? values[c].trim() : '';
+            if (
+                rawVal === '' ||
+                (applyPoCleaning && (rawVal === 'nan' || rawVal === '<NA>' || rawVal === 'None'))
+            ) {
+                rowArr[k] = null;
+            } else {
+                rowArr[k] = rawVal;
+            }
+        }
+
+        if (campanaIdxInKept !== -1) {
+            const campanaVal = (rowArr[campanaIdxInKept] ?? '').toUpperCase();
+            if (campanaVal === 'SIN OFERTA') {
+                sinOfertaCount++;
+                continue;
+            }
+        }
+
+        rows.push(rowArr);
     }
 
     console.log(
-        `Archivo cargado exitosamente (Codificación: ${encodingUsed}, Separador: '${selectedDelimiter}', Filas: ${rows.length.toLocaleString()}, Columnas: ${rawHeaders.length})`
+        `Archivo cargado exitosamente (Codificación: ${encodingUsed}, Separador: '${selectedDelimiter}', Filas: ${totalRawRows.toLocaleString()}, Columnas: ${initialCols})`
     );
 
+    if (applyPoCleaning) {
+        if (droppedTextCols.length > 0) {
+            console.log(`Columnas de texto eliminadas (${droppedTextCols.length}): ${droppedTextCols.join(', ')}`);
+        }
+        if (campanaIdxInKept !== -1) {
+            console.log(`Registros con 'Sin Oferta' eliminados: ${sinOfertaCount.toLocaleString()}`);
+        }
+        console.log(
+            `Datos transformados: ${rows.length.toLocaleString()} filas (antes: ${totalRawRows.toLocaleString()}), ${keptColumns.length} columnas (antes: ${initialCols})`
+        );
+    }
+
     return {
-        columns: rawHeaders.filter((h) => h.length > 0),
+        columns: keptColumns,
         rows
     };
 };
 
 /**
- * Replica la función Limpieza(df) de backend/scripts/pegado_oferta.py:
- * 1. Estandariza nombres de columnas a mayúsculas y sin espacios.
- * 2. Limpia la columna DOC ('nan', '<NA>', '', 'None' -> null).
- * 3. Elimina columnas TEXTO01..TEXTO20 y TEXTO1..TEXTO20.
- * 4. Filtra registros donde CAMPAÑA / CAMPANA / CAMPAÑA_OFERTA sea 'SIN OFERTA'.
+ * Replica la función Limpieza(df) de backend/scripts/pegado_oferta.py si no se aplicó durante readCsvFile.
  */
 export const cleanPoData = (data: CsvData): CsvData => {
     const initialRows = data.rows.length;
     const initialCols = data.columns.length;
 
-    // 1. Estandarizar nombres de columnas (mayúsculas y sin espacios)
     const upperColumns = data.columns.map((c) => c.trim().toUpperCase());
 
-    // 2. Identificar y eliminar columnas de texto (TEXTO01..TEXTO20 y TEXTO1..TEXTO20)
     const textTargets = new Set<string>();
     for (let i = 1; i <= 20; i++) {
         textTargets.add(`TEXTO${String(i).padStart(2, '0')}`);
         textTargets.add(`TEXTO${i}`);
     }
 
-    const droppedTextCols = upperColumns.filter((col) => textTargets.has(col));
-    const keptColumns = upperColumns.filter((col) => !textTargets.has(col));
+    const keptIndices: number[] = [];
+    const keptColumns: string[] = [];
+    const droppedTextCols: string[] = [];
+
+    for (let i = 0; i < upperColumns.length; i++) {
+        const col = upperColumns[i];
+        if (textTargets.has(col)) {
+            droppedTextCols.push(col);
+        } else {
+            keptIndices.push(i);
+            keptColumns.push(col);
+        }
+    }
 
     if (droppedTextCols.length > 0) {
         console.log(`Columnas de texto eliminadas (${droppedTextCols.length}): ${droppedTextCols.join(', ')}`);
     }
 
-    // Identificar columna de campaña
-    const campanaCol = keptColumns.find((c) =>
+    const campanaIdx = keptColumns.findIndex((c) =>
         ['CAMPAÑA', 'CAMPANA', 'CAMPAÑA_OFERTA'].includes(c)
     );
 
     let sinOfertaCount = 0;
-    const cleanedRows: Record<string, string | null>[] = [];
+    const cleanedRows: (string | null)[][] = [];
 
-    for (const rawRow of data.rows) {
-        const normalizedRow: Record<string, string | null> = {};
+    for (let r = 0; r < data.rows.length; r++) {
+        const rawRow = data.rows[r];
+        const normalizedRow = new Array<string | null>(keptIndices.length);
 
-        for (const origCol of data.columns) {
-            const upperCol = origCol.trim().toUpperCase();
-            if (textTargets.has(upperCol)) continue;
-
-            let val = rawRow[origCol] ?? null;
+        for (let k = 0; k < keptIndices.length; k++) {
+            let val = rawRow[keptIndices[k]] ?? null;
             if (val !== null) {
                 val = String(val).trim();
                 if (val === '' || val === 'nan' || val === '<NA>' || val === 'None') {
                     val = null;
                 }
             }
-            normalizedRow[upperCol] = val;
+            normalizedRow[k] = val;
         }
 
-        // 4. Filtrar registros 'Sin Oferta'
-        if (campanaCol) {
-            const campanaVal = (normalizedRow[campanaCol] ?? '').trim().toUpperCase();
+        if (campanaIdx !== -1) {
+            const campanaVal = (normalizedRow[campanaIdx] ?? '').toUpperCase();
             if (campanaVal === 'SIN OFERTA') {
                 sinOfertaCount++;
                 continue;
@@ -246,7 +334,7 @@ export const cleanPoData = (data: CsvData): CsvData => {
         cleanedRows.push(normalizedRow);
     }
 
-    if (campanaCol) {
+    if (campanaIdx !== -1) {
         console.log(`Registros con 'Sin Oferta' eliminados: ${sinOfertaCount.toLocaleString()}`);
     }
 
@@ -296,18 +384,524 @@ export const uploadTableToSql = async (
         }
 
         for (const row of chunk) {
-            const rowValues = data.columns.map((col) => {
-                const val = row[col];
-                if (val === undefined || val === null || val === '') return null;
-                return String(val).slice(0, 255);
-            });
+            const rowValues = new Array<string | null>(data.columns.length);
+            for (let c = 0; c < data.columns.length; c++) {
+                const val = row[c];
+                if (val === undefined || val === null || val === '') {
+                    rowValues[c] = null;
+                } else {
+                    rowValues[c] = String(val).slice(0, 255);
+                }
+            }
             table.rows.add(...rowValues);
         }
 
         await pool.request().bulk(table);
     }
 
+    // Liberar las filas en memoria tras finalizar la subida a SQL Server
+    data.rows.length = 0;
+
     console.log(`Carga completa en la tabla '${tableName}'.`);
+};
+
+function escapeXml(str: string): string {
+    // Escapar caracteres XML especiales y limpiar caracteres de control inválidos en XML 1.0
+    return str
+        .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&apos;');
+}
+
+function getExcelColumnName(colIndex: number): string {
+    let dividend = colIndex + 1;
+    let columnName = '';
+    while (dividend > 0) {
+        const modulo = (dividend - 1) % 26;
+        columnName = String.fromCharCode(65 + modulo) + columnName;
+        dividend = Math.floor((dividend - modulo) / 26);
+    }
+    return columnName;
+}
+
+function formatCellValue(val: any): string {
+    if (val === null || val === undefined) {
+        return '';
+    }
+    if (val instanceof Date) {
+        const day = String(val.getUTCDate()).padStart(2, '0');
+        const month = String(val.getUTCMonth() + 1).padStart(2, '0');
+        const year = val.getUTCFullYear();
+        return `${day}/${month}/${year}`;
+    }
+    return String(val);
+}
+
+const CRC32_TABLE = (() => {
+    const table = new Uint32Array(256);
+    for (let i = 0; i < 256; i++) {
+        let c = i;
+        for (let k = 0; k < 8; k++) {
+            c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+        }
+        table[i] = c >>> 0;
+    }
+    return table;
+})();
+
+function crc32Update(crc: number, buf: Buffer): number {
+    let c = (crc ^ 0xffffffff) >>> 0;
+    for (let i = 0; i < buf.length; i++) {
+        c = CRC32_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+    }
+    return (c ^ 0xffffffff) >>> 0;
+}
+
+interface ZipEntryRecord {
+    nameBuf: Buffer;
+    crc32: number;
+    compressedSize: number;
+    uncompressedSize: number;
+    localHeaderOffset: number;
+    compressionMethod: number;
+}
+
+/**
+ * Escritor ZIP por streaming sin mantener el archivo completo en RAM.
+ * Soporta entradas estáticas en memoria y entradas comprimidas por stream (DeflateRaw)
+ * con reservas de Local File Header actualizadas al finalizar cada entrada, de modo
+ * que tanto Excel como lectores basados en offsets locales (ej. getXlsxRowCountFast) funcionen al 100%.
+ */
+class StreamingZipWriter {
+    private fd: number;
+    private offset = 0;
+    private entries: ZipEntryRecord[] = [];
+
+    constructor(outputPath: string) {
+        this.fd = fs.openSync(outputPath, 'w');
+    }
+
+    private writeBufferAt(buf: Buffer, pos?: number): void {
+        if (pos !== undefined) {
+            fs.writeSync(this.fd, buf, 0, buf.length, pos);
+        } else {
+            fs.writeSync(this.fd, buf, 0, buf.length, this.offset);
+            this.offset += buf.length;
+        }
+    }
+
+    public addStaticEntry(name: string, content: string | Buffer): void {
+        const nameBuf = Buffer.from(name, 'utf8');
+        const rawBuf = typeof content === 'string' ? Buffer.from(content, 'utf8') : content;
+        const crc = crc32Update(0, rawBuf);
+        const compressedBuf = zlib.deflateRawSync(rawBuf);
+
+        const localHeaderOffset = this.offset;
+        const header = Buffer.alloc(30);
+        header.writeUInt32LE(0x04034b50, 0); // Local file header signature
+        header.writeUInt16LE(20, 4); // Version needed to extract (2.0)
+        header.writeUInt16LE(0, 6); // General purpose bit flag
+        header.writeUInt16LE(8, 8); // Compression method: 8 (Deflate)
+        header.writeUInt16LE(0, 10); // Last mod file time
+        header.writeUInt16LE(0, 12); // Last mod file date
+        header.writeUInt32LE(crc, 14); // CRC-32
+        header.writeUInt32LE(compressedBuf.length, 18); // Compressed size
+        header.writeUInt32LE(rawBuf.length, 22); // Uncompressed size
+        header.writeUInt16LE(nameBuf.length, 26); // File name length
+        header.writeUInt16LE(0, 28); // Extra field length
+
+        this.writeBufferAt(header);
+        this.writeBufferAt(nameBuf);
+        this.writeBufferAt(compressedBuf);
+
+        this.entries.push({
+            nameBuf,
+            crc32: crc,
+            compressedSize: compressedBuf.length,
+            uncompressedSize: rawBuf.length,
+            localHeaderOffset,
+            compressionMethod: 8
+        });
+    }
+
+    public async addDeflatedStreamEntry(
+        name: string,
+        produceChunks: (pushChunk: (str: string) => Promise<void>) => Promise<void>
+    ): Promise<void> {
+        const nameBuf = Buffer.from(name, 'utf8');
+        const localHeaderOffset = this.offset;
+
+        // Escribir cabecera local con CRC y tamaños provisionales en 0 (se parchean al terminar el stream)
+        const header = Buffer.alloc(30);
+        header.writeUInt32LE(0x04034b50, 0);
+        header.writeUInt16LE(20, 4);
+        header.writeUInt16LE(0, 6);
+        header.writeUInt16LE(8, 8); // Deflate
+        header.writeUInt16LE(0, 10);
+        header.writeUInt16LE(0, 12);
+        header.writeUInt32LE(0, 14); // CRC placeholder
+        header.writeUInt32LE(0, 18); // Compressed size placeholder
+        header.writeUInt32LE(0, 22); // Uncompressed size placeholder
+        header.writeUInt16LE(nameBuf.length, 26);
+        header.writeUInt16LE(0, 28);
+
+        this.writeBufferAt(header);
+        this.writeBufferAt(nameBuf);
+
+        let crc = 0;
+        let uncompressedSize = 0;
+        let compressedSize = 0;
+
+        const deflate = zlib.createDeflateRaw({ level: zlib.constants.Z_DEFAULT_COMPRESSION });
+
+        deflate.on('data', (chunk: Buffer) => {
+            this.writeBufferAt(chunk);
+            compressedSize += chunk.length;
+        });
+
+        const deflateDone = new Promise<void>((resolve, reject) => {
+            deflate.on('end', () => resolve());
+            deflate.on('error', (err) => reject(err));
+        });
+
+        const pushChunk = async (str: string): Promise<void> => {
+            const buf = Buffer.from(str, 'utf8');
+            crc = crc32Update(crc, buf);
+            uncompressedSize += buf.length;
+            if (!deflate.write(buf)) {
+                await new Promise<void>((resolve) => deflate.once('drain', resolve));
+            }
+        };
+
+        await produceChunks(pushChunk);
+        deflate.end();
+        await deflateDone;
+
+        // Parchear CRC-32 y tamaños en el Local File Header
+        const patch = Buffer.alloc(12);
+        patch.writeUInt32LE(crc, 0);
+        patch.writeUInt32LE(compressedSize, 4);
+        patch.writeUInt32LE(uncompressedSize >>> 0, 8);
+        this.writeBufferAt(patch, localHeaderOffset + 14);
+
+        this.entries.push({
+            nameBuf,
+            crc32: crc,
+            compressedSize,
+            uncompressedSize: uncompressedSize >>> 0,
+            localHeaderOffset,
+            compressionMethod: 8
+        });
+    }
+
+    public close(): void {
+        try {
+            const cdStartOffset = this.offset;
+            for (const entry of this.entries) {
+                const cdHeader = Buffer.alloc(46);
+                cdHeader.writeUInt32LE(0x02014b50, 0); // Central directory file header signature
+                cdHeader.writeUInt16LE(20, 4); // Version made by
+                cdHeader.writeUInt16LE(20, 6); // Version needed to extract
+                cdHeader.writeUInt16LE(0, 8); // General purpose bit flag
+                cdHeader.writeUInt16LE(entry.compressionMethod, 10); // Compression method
+                cdHeader.writeUInt16LE(0, 12); // Last mod file time
+                cdHeader.writeUInt16LE(0, 14); // Last mod file date
+                cdHeader.writeUInt32LE(entry.crc32, 16); // CRC-32
+                cdHeader.writeUInt32LE(entry.compressedSize, 20); // Compressed size
+                cdHeader.writeUInt32LE(entry.uncompressedSize, 24); // Uncompressed size
+                cdHeader.writeUInt16LE(entry.nameBuf.length, 28); // File name length
+                cdHeader.writeUInt16LE(0, 30); // Extra field length
+                cdHeader.writeUInt16LE(0, 32); // File comment length
+                cdHeader.writeUInt16LE(0, 34); // Disk number start
+                cdHeader.writeUInt16LE(0, 36); // Internal file attributes
+                cdHeader.writeUInt32LE(0, 38); // External file attributes
+                cdHeader.writeUInt32LE(entry.localHeaderOffset, 42); // Relative offset of local header
+
+                this.writeBufferAt(cdHeader);
+                this.writeBufferAt(entry.nameBuf);
+            }
+
+            const cdSize = this.offset - cdStartOffset;
+            const eocd = Buffer.alloc(22);
+            eocd.writeUInt32LE(0x06054b50, 0); // End of central directory signature
+            eocd.writeUInt16LE(0, 4); // Number of this disk
+            eocd.writeUInt16LE(0, 6); // Disk where central directory starts
+            eocd.writeUInt16LE(this.entries.length, 8); // Number of central directory records on this disk
+            eocd.writeUInt16LE(this.entries.length, 10); // Total number of central directory records
+            eocd.writeUInt32LE(cdSize, 12); // Size of central directory
+            eocd.writeUInt32LE(cdStartOffset, 16); // Offset of start of central directory
+            eocd.writeUInt16LE(0, 20); // Comment length
+
+            this.writeBufferAt(eocd);
+        } finally {
+            fs.closeSync(this.fd);
+        }
+    }
+}
+
+/**
+ * Ejecuta la query de cruce (RENIEC y Celulares) en SQL Server en modo STREAMING y exporta
+ * directamente los resultados a un archivo Excel (.xlsx) a medida que llegan las filas,
+ * sin almacenar las 300,000+ filas ni el árbol DOM de SheetJS en la memoria RAM de Node.js.
+ */
+export const executeEnrichmentAndExportToExcel = async (
+    pool: sql.ConnectionPool,
+    query: string,
+    outputExcelPath: string,
+    sheetName = 'BASE',
+    expectedRowCount = 0
+): Promise<number> => {
+    console.log('Ejecutando consulta SQL para cruce con RENIEC y Celulares...');
+
+    const zip = new StreamingZipWriter(outputExcelPath);
+    let totalRows = 0;
+
+    try {
+        // 1. Archivos XML estáticos del paquete OpenXML (.xlsx)
+        zip.addStaticEntry(
+            '_rels/.rels',
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+                '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>' +
+                '<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>' +
+                '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>' +
+                '</Relationships>'
+        );
+
+        zip.addStaticEntry(
+            'docProps/core.xml',
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+                '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" ' +
+                'xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" ' +
+                'xmlns:dcmitype="http://purl.org/dc/dcmitype/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"/>'
+        );
+
+        zip.addStaticEntry(
+            'docProps/app.xml',
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+                '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" ' +
+                'xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">' +
+                '<Application>Heracles</Application>' +
+                '<HeadingPairs><vt:vector size="2" baseType="variant"><vt:variant><vt:lpstr>Worksheets</vt:lpstr></vt:variant><vt:variant><vt:i4>1</vt:i4></vt:variant></vt:vector></HeadingPairs>' +
+                `<TitlesOfParts><vt:vector size="1" baseType="lpstr"><vt:lpstr>${escapeXml(sheetName)}</vt:lpstr></vt:vector></TitlesOfParts>` +
+                '</Properties>'
+        );
+
+        zip.addStaticEntry(
+            'xl/_rels/workbook.xml.rels',
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+                '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>' +
+                '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>' +
+                '</Relationships>'
+        );
+
+        zip.addStaticEntry(
+            'xl/workbook.xml',
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+                '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" ' +
+                'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">' +
+                '<workbookPr codeName="ThisWorkbook"/>' +
+                `<sheets><sheet name="${escapeXml(sheetName)}" sheetId="1" r:id="rId1"/></sheets>` +
+                '</workbook>'
+        );
+
+        zip.addStaticEntry(
+            'xl/styles.xml',
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+                '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +
+                '<fonts count="1"><font><sz val="11"/><name val="Calibri"/><family val="2"/></font></fonts>' +
+                '<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>' +
+                '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>' +
+                '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>' +
+                '<cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs>' +
+                '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>' +
+                '</styleSheet>'
+        );
+
+        // 2. Generar xl/worksheets/sheet1.xml directamente desde el stream de SQL Server
+        // Nota: El archivo xl/worksheets/sheet1.xml se escribe antes de [Content_Types].xml
+        // para que su entrada en el Central Directory quede en los últimos 64KB y getXlsxRowCountFast lo lea al instante.
+        await zip.addDeflatedStreamEntry('xl/worksheets/sheet1.xml', async (pushChunk) => {
+            await new Promise<void>((resolve, reject) => {
+                const req = pool.request();
+                req.stream = true;
+
+                let columns: string[] = [];
+                let colLetters: string[] = [];
+                let headerWritten = false;
+                let xmlBuffer = '';
+                let chain = Promise.resolve();
+                let isPaused = false;
+                let isSettled = false;
+
+                const safeReject = (err: Error) => {
+                    if (isSettled) return;
+                    isSettled = true;
+                    try {
+                        req.cancel();
+                    } catch {
+                        // Ignorar
+                    }
+                    reject(err);
+                };
+
+                const queueWrite = (str: string, forceFlush = false) => {
+                    if (isSettled) return;
+                    xmlBuffer += str;
+                    if (xmlBuffer.length >= 256 * 1024 || forceFlush) {
+                        const toWrite = xmlBuffer;
+                        xmlBuffer = '';
+                        if (!isPaused && !forceFlush) {
+                            isPaused = true;
+                            req.pause();
+                        }
+                        chain = chain
+                            .then(() => {
+                                if (isSettled) return;
+                                return pushChunk(toWrite);
+                            })
+                            .then(() => {
+                                if (isPaused && !forceFlush && !isSettled) {
+                                    isPaused = false;
+                                    req.resume();
+                                }
+                            })
+                            .catch((err) => {
+                                safeReject(err);
+                            });
+                    }
+                };
+
+                const ensureHeaderWritten = (expectedRowCount = 0) => {
+                    if (headerWritten) return;
+                    headerWritten = true;
+                    colLetters = columns.map((_, idx) => getExcelColumnName(idx));
+                    const lastColLetter = colLetters.length > 0 ? colLetters[colLetters.length - 1] : 'A';
+                    const dimLastRow = Math.max(1, expectedRowCount + 1);
+                    let headXml =
+                        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+                        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" ' +
+                        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">' +
+                        `<dimension ref="A1:${lastColLetter}${dimLastRow}"/>` +
+                        '<sheetViews><sheetView workbookViewId="0"/></sheetViews>' +
+                        '<sheetData>';
+
+                    if (columns.length > 0) {
+                        headXml += '<row r="1">';
+                        for (let c = 0; c < columns.length; c++) {
+                            headXml += `<c r="${colLetters[c]}1" t="str"><v>${escapeXml(columns[c])}</v></c>`;
+                        }
+                        headXml += '</row>';
+                    }
+                    queueWrite(headXml);
+                };
+
+                req.on('recordset', (cols: Record<string, any>) => {
+                    columns = Object.keys(cols);
+                });
+
+                req.on('row', (row: Record<string, any>) => {
+                    if (columns.length === 0) {
+                        columns = Object.keys(row);
+                    }
+                    ensureHeaderWritten(expectedRowCount);
+                    totalRows++;
+                    const excelRowNum = totalRows + 1;
+
+                    let rowXml = `<row r="${excelRowNum}">`;
+                    for (let c = 0; c < columns.length; c++) {
+                        const rawVal = row[columns[c]];
+                        if (rawVal === null || rawVal === undefined || rawVal === '') {
+                            continue;
+                        }
+                        const strVal = formatCellValue(rawVal);
+                        if (strVal === '') continue;
+                        rowXml += `<c r="${colLetters[c]}${excelRowNum}" t="str"><v>${escapeXml(strVal)}</v></c>`;
+                    }
+                    rowXml += '</row>';
+                    queueWrite(rowXml);
+                });
+
+                req.on('error', (err: Error) => {
+                    safeReject(err);
+                });
+
+                req.on('done', () => {
+                    ensureHeaderWritten(expectedRowCount);
+                    const lastColLetter = colLetters.length > 0 ? colLetters[colLetters.length - 1] : 'A';
+                    const lastRowNum = totalRows + 1;
+                    const tailXml =
+                        `</sheetData>` +
+                        `<ignoredErrors><ignoredError numberStoredAsText="1" sqref="A1:${lastColLetter}${lastRowNum}"/></ignoredErrors>` +
+                        `</worksheet>`;
+                    queueWrite(tailXml, true);
+                    chain
+                        .then(() => {
+                            if (!isSettled) {
+                                isSettled = true;
+                                resolve();
+                            }
+                        })
+                        .catch((err) => safeReject(err));
+                });
+
+                req.query(query);
+            });
+        });
+
+        zip.addStaticEntry(
+            '[Content_Types].xml',
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+                '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+                '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+                '<Default Extension="xml" ContentType="application/xml"/>' +
+                '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' +
+                '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' +
+                '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>' +
+                '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>' +
+                '<Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>' +
+                '</Types>'
+        );
+
+        zip.close();
+
+        // Guardar en caché el conteo de filas del archivo recién generado para el Dashboard
+        try {
+            const stat = fs.statSync(outputExcelPath);
+            const fname = path.basename(outputExcelPath);
+            const processType: 'po' | 'csf' = fname.startsWith('BASE_PO') ? 'po' : 'csf';
+            fileMetadataCache.set(outputExcelPath, {
+                mtimeMs: stat.mtimeMs,
+                size: stat.size,
+                rows: totalRows,
+                processType
+            });
+        } catch {
+            // Ignorar si falla actualización de caché
+        }
+
+        console.log(`Consulta ejecutada exitosamente. Registros obtenidos: ${totalRows.toLocaleString()}`);
+        console.log(`Archivo generado exitosamente: ${outputExcelPath} (${totalRows.toLocaleString()} registros)`);
+        return totalRows;
+    } catch (err) {
+        try {
+            zip.close();
+        } catch {
+            // Ignorar error al cerrar en caso de fallo
+        }
+        if (fs.existsSync(outputExcelPath)) {
+            try {
+                fs.unlinkSync(outputExcelPath);
+            } catch {
+                // Ignorar
+            }
+        }
+        throw err;
+    }
 };
 
 /**
@@ -490,7 +1084,8 @@ export function getXlsxRowCountFast(filePath: string): number {
                 }
                 const m =
                     xmlHead.match(/<dimension\s+ref="[A-Z]+\d+:[A-Z]+(\d+)"/) ||
-                    xmlHead.match(/<dimension\s+ref="[A-Z]+(\d+)"/);
+                    xmlHead.match(/<dimension\s+ref="[A-Z]+(\d+)"/) ||
+                    xmlHead.match(/sqref="[A-Z]+\d+:[A-Z]+(\d+)"/);
                 if (m) {
                     return Math.max(0, parseInt(m[1], 10) - 1);
                 }

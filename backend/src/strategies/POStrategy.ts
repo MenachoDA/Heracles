@@ -2,10 +2,8 @@ import { ProcessingStrategy, OutputMetadata } from './ProcessingStrategy';
 import {
     loadQueryFromScript,
     readCsvFile,
-    cleanPoData,
     uploadTableToSql,
-    executeEnrichmentQuery,
-    exportToExcel,
+    executeEnrichmentAndExportToExcel,
     dropTableSql,
     getFileSize
 } from '../utils/fileUtils';
@@ -70,9 +68,9 @@ export class POStrategy implements ProcessingStrategy {
             throw new Error('El archivo debe tener extensión .csv');
         }
 
-        // 1. Leer archivo CSV y aplicar limpieza (TEXTO01..20 y filtro 'Sin Oferta')
-        const rawCsv = readCsvFile(inputFilePath);
-        const cleanedData = cleanPoData(rawCsv);
+        // 1. Leer archivo CSV y aplicar limpieza en una sola pasada (TEXTO01..20 y filtro 'Sin Oferta')
+        const cleanedData = readCsvFile(inputFilePath, true);
+        const expectedRowCount = cleanedData.rows.length;
 
         // 2. Obtener conexión a SQL Server configurada en server.ts
         const pool = await getDbPool();
@@ -83,12 +81,17 @@ export class POStrategy implements ProcessingStrategy {
         const outputFileName = `BASE_PO_${Date.now()}.xlsx`;
         const outputPath = path.join(__dirname, '../../outputs', outputFileName);
 
-        // 4. Subir tabla BASEPO, ejecutar query de cruce, exportar a Excel y eliminar tabla temporal
+        // 4. Subir tabla BASEPO, ejecutar query de cruce en modo streaming hacia Excel y eliminar tabla temporal
         await uploadTableToSql(pool, 'BASEPO', cleanedData);
 
         try {
-            const enrichedRows = await executeEnrichmentQuery(pool, queryCruce);
-            exportToExcel(enrichedRows, outputPath, 'BASE');
+            const totalRows = await executeEnrichmentAndExportToExcel(
+                pool,
+                queryCruce,
+                outputPath,
+                'BASE',
+                expectedRowCount
+            );
 
             const size = getFileSize(outputPath);
             console.log('¡PROCESO DE PEGADO DE OFERTA FINALIZADO CON ÉXITO!');
@@ -96,7 +99,7 @@ export class POStrategy implements ProcessingStrategy {
             return {
                 name: 'BASE_PO.xlsx',
                 size: size,
-                rows: enrichedRows.length.toLocaleString('en-US'),
+                rows: totalRows.toLocaleString('en-US'),
                 downloadId: outputFileName
             };
         } finally {

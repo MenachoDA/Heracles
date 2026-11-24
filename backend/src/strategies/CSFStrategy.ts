@@ -3,8 +3,7 @@ import {
     loadQueryFromScript,
     readCsvFile,
     uploadTableToSql,
-    executeEnrichmentQuery,
-    exportToExcel,
+    executeEnrichmentAndExportToExcel,
     dropTableSql,
     getFileSize
 } from '../utils/fileUtils';
@@ -70,6 +69,7 @@ export class CSFStrategy implements ProcessingStrategy {
 
         // 1. Leer archivo CSV
         const csvData = readCsvFile(inputFilePath);
+        const expectedRowCount = csvData.rows.length;
 
         // 2. Obtener conexión a SQL Server configurada en server.ts
         const pool = await getDbPool();
@@ -83,12 +83,17 @@ export class CSFStrategy implements ProcessingStrategy {
         const physicalOutputName = `${Date.now()}_${logicalOutputName}`;
         const outputPath = path.join(__dirname, '../../outputs', physicalOutputName);
 
-        // 4. Subir tabla BASECSF, ejecutar query de cruce, exportar a Excel y eliminar tabla temporal
+        // 4. Subir tabla BASECSF, ejecutar query de cruce en modo streaming hacia Excel y eliminar tabla temporal
         await uploadTableToSql(pool, 'BASECSF', csvData);
 
         try {
-            const enrichedRows = await executeEnrichmentQuery(pool, queryCruce);
-            exportToExcel(enrichedRows, outputPath, 'BASE');
+            const totalRows = await executeEnrichmentAndExportToExcel(
+                pool,
+                queryCruce,
+                outputPath,
+                'BASE',
+                expectedRowCount
+            );
 
             const size = getFileSize(outputPath);
             console.log('¡PROCESO DE ENRIQUECIMIENTO FINALIZADO CON ÉXITO!');
@@ -96,7 +101,7 @@ export class CSFStrategy implements ProcessingStrategy {
             return {
                 name: logicalOutputName,
                 size: size,
-                rows: enrichedRows.length.toLocaleString('en-US'),
+                rows: totalRows.toLocaleString('en-US'),
                 downloadId: physicalOutputName
             };
         } finally {

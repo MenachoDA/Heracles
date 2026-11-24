@@ -1,11 +1,11 @@
 {
     "name": "Heracles",
-    "version": "2.3.3",
+    "version": "2.3.4",
     "description": "Backend API para ejecución de scripts de Python",
     "main": "src/server.ts",
     "scripts": {
-        "start": "ts-node src/server.ts",
-        "dev": "ts-node-dev --respawn src/server.ts"
+        "start": "ts-node --max-old-space-size=8192 src/server.ts",
+        "dev": "ts-node-dev --max-old-space-size=8192 --respawn src/server.ts"
     },
     "dependencies": {
         "@types/mssql": "^12.3.0",
