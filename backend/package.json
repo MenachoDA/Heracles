@@ -4,7 +4,7 @@
     "description": "Backend API para ejecución de scripts de Python",
     "main": "src/server.ts",
     "scripts": {
-        "start": "ts-node --max-old-space-size=8192 src/server.ts",
+        "start": "node --max-old-space-size=8192 -r ts-node/register src/server.ts",
         "dev": "ts-node-dev --max-old-space-size=8192 --respawn src/server.ts"
     },
     "dependencies": {
